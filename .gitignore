@@ -2,3 +2,4 @@ venv/
 *.db
 *.sql
 __pycache__/
+models/

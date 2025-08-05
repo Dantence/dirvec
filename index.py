@@ -6,7 +6,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 DB = "dirvec.db"
-MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+MODEL = SentenceTransformer("./models/all-MiniLM-L6-v2")
 
 def init_db():
     conn = sqlite3.connect(DB)

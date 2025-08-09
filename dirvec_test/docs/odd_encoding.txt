@@ -1,0 +1,2 @@
+partly textÿþ with invalid utf-8 bytes
+more lines

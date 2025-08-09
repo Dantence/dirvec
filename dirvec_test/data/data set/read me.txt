@@ -1,0 +1,1 @@
+This path contains spaces; useful to test shell completion and semantic retrieval.

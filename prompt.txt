@@ -1,0 +1,97 @@
+Level 1：可靠、可配置、可扩展的索引器
+
+目标：把基本 demo 变成“可长期运行”的工具。增加 CLI、忽略规则、二进制识别、大文件跳过、批量向量化、SQLite WAL、索引增量更新、删除清理。
+产出：稳健的 index.py，仍然使用 SQLite + 向量存储，complete.py 基本不变。
+Level 2：更优召回与重排（Lexical + Semantic）
+
+在 SQLite 里增加 FTS5（全文索引），结合 BM25 分数与向量相似度做混合检索；加入“命令意图”规则（如 cd 更偏向目录，vim 偏向文本文件）。
+Level 3：性能升级与近似检索
+
+引入 FAISS/Annoy/HNSW 做 ANN，向量单独管理；内存映射与分块；超大仓库也能秒级返回。
+Level 4：目录级语义和上下文
+
+计算目录向量（聚合其文件）；结合当前工作目录上下文；Git 感知（优先 git-tracked / 最近变更、commit message 融合）。
+Level 5：实时更新与后台服务
+
+watchdog 实时监听；后台索引服务；命令行快速刷新；并发安全。
+Level 6：产品化与测试
+
+dirvec 命令行工具；配置文件 ~/.config/dirvec/config.toml；Bash/Zsh/Fish 插件；单元测试与基准；打包发布。
+Level 7：创新点与简历亮点
+
+用户意图建模（时间/最近操作/频率/个性化词汇）；“任务级补全”范式（例如：找日志/开 PR 相关文件）；离线轻量 reranker；多库多根目录与配额管理。
+
+
+
+
+Level 2：在词法和语义上做“混合检索 + 命令意图偏置”。这一步主要带来两点提升：
+
+检索质量：在 SQLite 中引入 FTS5（BM25）全文检索，和向量相似度做融合；
+更贴近真实命令场景：根据前缀中的命令词（vim/grep/python/cd 等）对文件类型/扩展名/目录进行偏置。
+下面给出本次升级的完整代码（index.py 与 complete.py）。请按需替换你项目中的文件。
+
+代码 1/2：index.py（新增 FTS5，保持外表 files 同步）
+
+新增 FTS5 虚表 files_fts(path, content) 并在批量 flush 时同步（delete+insert）
+支持 prefix 查询（2、3、4 字符前缀），提升 “src/uti” 这类前缀效果
+FTS5 不可用时自动降级（仅语义向量）
+
+代码 2/2：complete.py（混合检索 + 命令意图偏置）
+
+解析前缀，识别命令词（vim/grep/python/node/tail/less/cd 等）
+FTS5 BM25 召回与语义向量召回合并，统一重排
+针对 cd：把候选文件映射到父目录，并按综合分及路径深度排序
+扩展名偏置：不同命令调整扩展名权重与文件类型偏置
+
+
+Level 3：用 FAISS 做近似向量检索，向量单独管理，分批与内存友好处理，针对大仓库做到秒级返回。下面给出全新实现（不保持兼容）。包含两个文件：
+
+index.py：扫描文件、生成/更新向量、维护 SQLite 元数据、构建或增量更新 FAISS 索引（支持 IVF-PQ/HNSW，支持 on-disk inverted lists）
+complete.py：加载 FAISS，完成 ANN 搜索，并结合 Level 2 的意图偏置与可选 FTS5 混合
+请将以下代码保存并替换你的文件。
+
+依赖
+
+pip install sentence-transformers faiss-cpu numpy sqlite-utils
+可选：系统 SQLite 支持 FTS5（多数 Python 发行版已启用）。未启用时自动降级。
+文件 1/2：index.py
+
+向量不再存入 SQLite；仅存元数据与 doc_id 映射
+使用 64-bit 稳定 doc_id（路径哈希）
+选择索引类型：大规模默认 IVF-PQ，小规模默认 HNSW；可由 CLI 指定
+分批向量化与增量更新：新增/修改 add_with_ids，删除 remove_ids；删除过多时可 --rebuild
+可选 on-disk inverted lists：适合超大索引内存不够时（ivfdata 写盘）
+可选 FTS5：混合检索（Level 2 逻辑在 complete.py 使用）
+
+文件 2/2：complete.py
+
+使用 FAISS 近似检索（毫秒级），不再将全量向量载入内存
+Level 2 的意图偏置仍保留（命令词 + 扩展名偏置 + 目录模式），可选与 FTS5 结果融合
+IVF 参数 nprobe、HNSW 的 efSearch 可调，兼顾速度与质量
+
+使用方法
+
+构建索引（推荐在你之前的 dirvec_test 上实验）
+小中仓库（自动 HNSW）：
+python index.py --root ./dirvec_test --db dirvec.sqlite3 --index faiss.index --model sentence-transformers/all-MiniLM-L6-v2 --prune
+大仓库（强制 IVF-PQ 并启用 on-disk）：
+python index.py --root /path/to/huge --db huge.sqlite3 --index huge.faiss --model sentence-transformers/all-MiniLM-L6-v2 --faiss "IVF4096,PQ32" --ondisk-ivf --prune
+强制重建：
+python index.py --root ./dirvec_test --rebuild --prune
+查询（FAISS + ANN + 意图偏置 + 可选 FTS）
+python complete.py "vim utils parser" dirvec.sqlite3 faiss.index
+python complete.py "cd src uti" dirvec.sqlite3 faiss.index
+python complete.py "grep error log" dirvec.sqlite3 faiss.index
+性能说明
+
+向量独立管理，搜索时只读 FAISS 索引文件（ANN），避免加载全量矩阵
+IVF-PQ 支持百万级向量的低内存索引；可用 on-disk inverted lists 将倒排表落盘
+HNSW 在小中规模上延迟极低，更新简单
+分批向量化，避免内存峰值；训练仅抽样小批
+默认开启多线程（faiss.omp_set_num_threads）
+工程建议（可作为下一步细化）
+
+为 IVF 重建提供“冷启动器”：将历史 doc 向量采样缓存到本地 memmap 以便快速 retrain
+维护删除比例指标，超过阈值自动触发重建
+查询时结合当前工作目录上下文、Git 变更热度做 rerank
+将 index/search 封装为 dirvec 命令行工具，打包发布，并加上单元测试与基准脚本
